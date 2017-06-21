@@ -30,68 +30,64 @@
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#pragma once
+ #pragma once
 
-#include <functional>
-#include <utility>
-#include <vector>
-
-#include "dispatcher/SingleThreadDispatcher.hpp"
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 namespace reducpp {
 
-template <
-    typename State,
-    typename Action,
-    template<typename St> class Dispatcher = SingleThreadDispatcher>
-class Store {
+template <typename Store>
+class AsyncDispatcher {
 public:
-    using StateType = State;
-    using ActionType = Action;
-    using DispatcherType = Dispatcher<Store>;
-    using Reducer = std::function<State(StateType, ActionType)>;
-    using NextFunction = std::function<void(ActionType)>;
-    using Middleware = std::function<void(Store&, NextFunction, ActionType)>;
+    using StoreType = Store;
+    using ActionType = typename StoreType::ActionType;
 
-    friend class Dispatcher<Store>;
+    AsyncDispatcher(StoreType& store) :
+        store_(store),
+        keepRunning_(true),
+        executor_(&AsyncDispatcher::execFunction, this)
+    {}
 
-    Store(State state, Reducer reducer, std::vector<Middleware> middleware) :
-        dispatcher_(*this),
-        state_(std::move(state)),
-        reducer_(std::move(reducer)),
-        middleware_(std::move(middleware))
+    ~AsyncDispatcher()
     {
-        NextFunction applyMiddlewareAndReducer = [this](Action action) {
-            state_ = reducer_(std::move(state_), std::move(action));
-        };
-
-        for (auto it = middleware_.rbegin(); it != middleware_.rend(); ++it) {
-            const auto& m = *it;
-            applyMiddlewareAndReducer = [this, &m, applyMiddlewareAndReducer](Action action) {
-                m(*this, applyMiddlewareAndReducer, std::move(action));
-            };
-        }
-
-        performDispatch_ = move(applyMiddlewareAndReducer);
+        keepRunning_ = false;
+        queueCv_.notify_all();
+        executor_.join();
     }
 
     void dispatch(ActionType action)
     {
-        dispatcher_.dispatch(std::move(action));
+        std::lock_guard<std::mutex> _(queueMutex_);
+        actionQueue_.push_back(std::move(action));
+        queueCv_.notify_all();
     }
-
-    const StateType& getState() const
-    {
-        return state_;
-    }
-
 private:
-    DispatcherType dispatcher_;
-    State state_;
-    Reducer reducer_;
-    std::vector<Middleware> middleware_;
+    void execFunction()
+    {
+        while (keepRunning_) {
+            std::unique_lock<std::mutex> l(queueMutex_);
+            queueCv_.wait(l, [this]() -> bool { return !keepRunning_ || !actionQueue_.empty();});
+            if (!keepRunning_) {
+                break;
+            }
+            ActionType action = std::move(actionQueue_.front());
+            actionQueue_.pop_front();
+            l.unlock();
 
-    std::function<void(Action)> performDispatch_;
+            store_.performDispatch_(std::move(action));
+        }
+    }
+
+    StoreType& store_;
+    std::deque<ActionType> actionQueue_;
+    std::mutex queueMutex_;
+    std::condition_variable queueCv_;
+    std::atomic<bool> keepRunning_;
+    std::thread executor_;
 };
 
 } // namespace reducpp

@@ -32,66 +32,26 @@
 
 #pragma once
 
-#include <functional>
 #include <utility>
-#include <vector>
-
-#include "dispatcher/SingleThreadDispatcher.hpp"
 
 namespace reducpp {
 
-template <
-    typename State,
-    typename Action,
-    template<typename St> class Dispatcher = SingleThreadDispatcher>
-class Store {
+template <typename Store>
+class SingleThreadDispatcher {
 public:
-    using StateType = State;
-    using ActionType = Action;
-    using DispatcherType = Dispatcher<Store>;
-    using Reducer = std::function<State(StateType, ActionType)>;
-    using NextFunction = std::function<void(ActionType)>;
-    using Middleware = std::function<void(Store&, NextFunction, ActionType)>;
+    using StoreType = Store;
+    using ActionType = typename StoreType::ActionType;
 
-    friend class Dispatcher<Store>;
-
-    Store(State state, Reducer reducer, std::vector<Middleware> middleware) :
-        dispatcher_(*this),
-        state_(std::move(state)),
-        reducer_(std::move(reducer)),
-        middleware_(std::move(middleware))
-    {
-        NextFunction applyMiddlewareAndReducer = [this](Action action) {
-            state_ = reducer_(std::move(state_), std::move(action));
-        };
-
-        for (auto it = middleware_.rbegin(); it != middleware_.rend(); ++it) {
-            const auto& m = *it;
-            applyMiddlewareAndReducer = [this, &m, applyMiddlewareAndReducer](Action action) {
-                m(*this, applyMiddlewareAndReducer, std::move(action));
-            };
-        }
-
-        performDispatch_ = move(applyMiddlewareAndReducer);
-    }
+    SingleThreadDispatcher(StoreType& store) :
+        store_(store)
+    {}
 
     void dispatch(ActionType action)
     {
-        dispatcher_.dispatch(std::move(action));
+        store_.performDispatch_(std::move(action));
     }
-
-    const StateType& getState() const
-    {
-        return state_;
-    }
-
 private:
-    DispatcherType dispatcher_;
-    State state_;
-    Reducer reducer_;
-    std::vector<Middleware> middleware_;
-
-    std::function<void(Action)> performDispatch_;
+    StoreType& store_;
 };
 
 } // namespace reducpp
